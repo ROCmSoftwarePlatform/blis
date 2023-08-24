@@ -3,6 +3,8 @@
 #include "bli_offloader.h"
 #include <dlfcn.h>
 #include <limits.h>
+#include "mjson.h"
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +17,70 @@ extern rntm_t global_rntm;
 // resides in bli_rntm.c.)
 extern bli_pthread_mutex_t global_rntm_mutex;
 
+// PM1 parametrization - in static fields to be able to parse through mjson
+static const int BLI_OFF_CPU_A = 0;
+static const int BLI_OFF_CPU_B = 1;
+static const int BLI_OFF_ACC_A = 2;
+static const int BLI_OFF_ACC_B = 3;
+static bool   bli_off_mem_trans;
+static double bli_off_a_mem;
+static double bli_off_b_mem;
+static int    bli_off_sgemm_count;
+static double bli_off_sgemm[4];
+static int    bli_off_sgemm_sq_count;
+static double bli_off_sgemm_sq[4];
+static int    bli_off_dgemm_count;
+static double bli_off_dgemm[4];
+static int    bli_off_dgemm_sq_count;
+static double bli_off_dgemm_sq[4];
+static int    bli_off_cgemm_count;
+static double bli_off_cgemm[4];
+static int    bli_off_cgemm_sq_count;
+static double bli_off_cgemm_sq[4];
+static int    bli_off_zgemm_count;
+static double bli_off_zgemm[4];
+static int    bli_off_zgemm_sq_count;
+static double bli_off_zgemm_sq[4];
+
+static const struct json_attr_t json_attrs_bli_off[] = {
+    {"mem_transfer_needed",   t_boolean, .addr.boolean = &bli_off_mem_trans,},
+    {"a_mem_byte",   t_real, .addr.real = &bli_off_a_mem,},
+    {"b_mem_byte",   t_real, .addr.real = &bli_off_b_mem,},
+    {"sgemm",        t_array,	.addr.array.element_type = t_real,
+				.addr.array.arr.reals = bli_off_sgemm,
+				.addr.array.maxlen = 4,
+				.addr.array.count = &bli_off_sgemm_count},
+    {"sgemm_sq",     t_array,   .addr.array.element_type = t_real,
+                                .addr.array.arr.reals = bli_off_sgemm_sq,
+                                .addr.array.maxlen = 4,
+                                .addr.array.count = &bli_off_sgemm_sq_count},
+    {"dgemm",        t_array,   .addr.array.element_type = t_real,
+                                .addr.array.arr.reals = bli_off_dgemm,
+                                .addr.array.maxlen = 4,
+                                .addr.array.count = &bli_off_dgemm_count},
+    {"dgemm_sq",     t_array,   .addr.array.element_type = t_real,
+                                .addr.array.arr.reals = bli_off_dgemm_sq,
+                                .addr.array.maxlen = 4,
+                                .addr.array.count = &bli_off_dgemm_sq_count},
+    {"cgemm",        t_array,   .addr.array.element_type = t_real,
+                                .addr.array.arr.reals = bli_off_cgemm,
+                                .addr.array.maxlen = 4,
+                                .addr.array.count = &bli_off_cgemm_count},
+    {"cgemm_sq",     t_array,   .addr.array.element_type = t_real,
+                                .addr.array.arr.reals = bli_off_cgemm_sq,
+                                .addr.array.maxlen = 4,
+                                .addr.array.count = &bli_off_cgemm_sq_count},
+    {"zgemm",        t_array,   .addr.array.element_type = t_real,
+                                .addr.array.arr.reals = bli_off_zgemm,
+                                .addr.array.maxlen = 4,
+                                .addr.array.count = &bli_off_zgemm_count},
+    {"zgemm_sq",     t_array,   .addr.array.element_type = t_real,
+                                .addr.array.arr.reals = bli_off_zgemm_sq,
+                                .addr.array.maxlen = 4,
+                                .addr.array.count = &bli_off_zgemm_sq_count},
+    {NULL},
+};
+
 void bli_offloader_init ( void )
 {
 	bli_offloader_init_rntm_from_env ( &global_rntm );
@@ -23,8 +89,8 @@ void bli_offloader_init ( void )
 void bli_offloader_init_rntm_from_env ( rntm_t* rntm )
 {
 	// allocate struct
-	rntm->offloader_state = malloc ( sizeof ( offload_t ) );
-	offload_t* config = rntm->offloader_state;
+	rntm->offloader_state = malloc ( sizeof ( bli_offload_t ) );
+	bli_offload_t* config = rntm->offloader_state;
 	config->rocblas = NULL;
 
 	char* s_eng = getenv ( "BLIS_OFFLOAD" );
@@ -32,6 +98,7 @@ void bli_offloader_init_rntm_from_env ( rntm_t* rntm )
 	if ( strcmp ( s_eng, "never" ) == 0 )
 	{
 		fprintf ( stdout, "Never attempting to offload.\n" );
+		config->model = never;
 		config->never_offload_dgemm = true;
 		config->never_offload_sgemm = true;
 		config->never_offload_zgemm = true;
@@ -45,6 +112,7 @@ void bli_offloader_init_rntm_from_env ( rntm_t* rntm )
 	else if ( strcmp ( s_eng, "always" ) == 0 )
 	{
 		fprintf ( stdout, "Always attempting to offload.\n" );
+		config->model = always;
 		config->never_offload_dgemm = false;
 		config->never_offload_sgemm = false;
 		config->never_offload_zgemm = false;
@@ -59,6 +127,7 @@ void bli_offloader_init_rntm_from_env ( rntm_t* rntm )
 	{
 		const char* s_sgemm = getenv ( "BLIS_OFFLOAD_SGEMM_THRESH" );
 		const int64_t offload_after_s = ( s_sgemm == NULL ) ? LLONG_MAX : atol ( s_sgemm );
+		config->model = threshold;
 		config->offload_sgemm_thresh = offload_after_s;
 
 		if ( offload_after_s == LLONG_MAX )
@@ -117,6 +186,59 @@ void bli_offloader_init_rntm_from_env ( rntm_t* rntm )
                         config->never_offload_zgemm = false;
                 }
 
+		// still initialize rocBLAS handle
+	}
+        else if ( strcmp ( s_eng, "pm1" ) == 0 )
+        {
+		fprintf ( stdout, "Using PM1 to decide offload.\n" );
+		config->model = pm1;
+		config->never_offload_dgemm = false;
+		config->never_offload_sgemm = false;
+		config->never_offload_zgemm = false;
+		config->never_offload_cgemm = false;
+
+		char* s_pm1_file = getenv ( "BLIS_PM1_PARAMS_FILE" );
+		s_pm1_file = ( s_pm1_file == NULL ) ? "pm1_params.txt" : s_pm1_file;
+
+		FILE *fp = NULL;
+		size_t file_size = 0;
+		char *buff = NULL;
+
+		fp = fopen ( s_pm1_file , "rb" );
+		if ( !fp )
+		{
+			fprintf ( stderr, "BLIS offload: Failed to open file %s\n", s_pm1_file );
+			exit ( 1 );
+		}
+
+		fseek ( fp , 0L , SEEK_END);
+		file_size = ftell( fp );
+		rewind ( fp );
+
+		buff = calloc( file_size + 1, sizeof( char ) );
+		if ( !buff )
+		{
+			fprintf ( stderr, "BLIS offload: calloc failed\n" );
+			fclose ( fp );
+			exit ( 1 );
+		}
+
+		if ( 1 != fread( buff , file_size, 1 , fp) )
+		{
+			fprintf ( stderr, "BLIS offload: PM1 file read failed.\n" );
+			fclose ( fp );
+			free ( buff );
+			exit ( 1 );
+		}
+
+		fclose ( fp );
+
+		// parse json
+		const int json_status =  json_read_object ( buff, json_attrs_bli_off, NULL );
+		if ( json_status != 0 )
+			fprintf(stderr, "BLIS offload: illegal status of parsing PM1 parameters: %d\n", json_status );
+
+		free ( buff );
 		// still initialize rocBLAS handle
 	}
 	else
@@ -190,13 +312,30 @@ bool bli_do_offload_gemmex_rntm_from_env
      )
 {
 
-	offload_t* config = rntm->offloader_state;
+	bli_offload_t* config = rntm->offloader_state;
 
-	// never offload anything
-	if ( config->never_offload_dgemm && config->never_offload_sgemm )
-	{
-		return false;
-	}
+        // figure out data type and whether we offload for it is enabled at all
+        const bool is_float_c = bli_obj_is_float ( c );
+        const bool is_double_c = bli_obj_is_double ( c );
+	const bool is_scmpl_c = bli_obj_is_scomplex ( c );
+	const bool is_dcmpl_c = bli_obj_is_dcomplex ( c );
+	const bool is_compl_c = is_scmpl_c || is_dcmpl_c;
+        if ( is_float_c && config->never_offload_sgemm )
+        {
+                return false;
+        }
+        else if ( is_double_c && config->never_offload_dgemm )
+        {
+                return false;
+        }
+        else if ( is_scmpl_c && config->never_offload_cgemm )
+        {
+                return false;
+        }
+        else if ( is_dcmpl_c && config->never_offload_zgemm )
+        {
+                return false;
+        }
 
 	// figure out if C is integer and reject (for now)
 	// NOTE: rocBLAS supports f16, f16 cmpl, f32, f32 cmpl, f64, f64 cmpl, i8, u8, i32,
@@ -216,42 +355,203 @@ bool bli_do_offload_gemmex_rntm_from_env
 		return false;
 	}
 
-	// figure out if the result matrix C's M*N is above or below the data type specific cutoff
-	const bool is_float_c = bli_obj_is_float ( c );
-	const bool is_compl_c = bli_obj_is_complex ( c );
-	if ( is_float_c && !is_compl_c && config->never_offload_sgemm )
-	{
-		return false;
-	}
-	else if ( !is_float_c && !is_compl_c && config->never_offload_dgemm )
-	{
-		return false;
-	}
-	else if ( is_float_c && is_compl_c && config->never_offload_cgemm )
+	if ( config->model == always ) return true;
+	else if ( config->model == never ) return false;
+	else if ( config->model == threshold )
         {
-                return false;
-        }
-        else if ( !is_float_c && is_compl_c && config->never_offload_zgemm )
-        {
-                return false;
-        }
+		// figure out if the M*N*K effort is above or below the data type specific cutoff
+		const dim_t m_c = bli_obj_length ( c );
+		const dim_t n_c = bli_obj_width ( c );
+		const dim_t k_a = bli_obj_has_trans ( a ) ? bli_obj_width ( a ) : bli_obj_length ( a );
+		const size_t mul = m_c * n_c * k_a;
 
-	const dim_t m_c = bli_obj_length ( c );
-	const dim_t n_c = bli_obj_width ( c );
-	const size_t mul = m_c * n_c;
+		if ( !is_compl_c )
+		{
+			const int64_t thresh = ( is_float_c ) ? config->offload_sgemm_thresh : config->offload_dgemm_thresh;
+			return ( mul >= thresh );
+		}
+		else
+		{
+			// make sure we're not conjugate AND not transpose
+			if ( bli_obj_has_conj( a ) && !bli_obj_has_trans( a ) ) return false;
+			if ( bli_obj_has_conj( b ) && !bli_obj_has_trans( b ) ) return false;
 
-	if ( !is_compl_c )
-	{
-		return ( is_float_c ) ? ( mul >= config->offload_sgemm_thresh ) : ( mul >= config->offload_dgemm_thresh );
+			const int64_t thresh = ( is_scmpl_c ) ? config->offload_cgemm_thresh : config->offload_zgemm_thresh;
+			return ( mul >= thresh );
+		}
 	}
-	else
+	else if ( config->model == pm1 )
 	{
-		// make sure we're not conjugate AND not transpose
-		if ( bli_obj_has_conj( a ) && !bli_obj_has_trans( a ) ) return false;
-		if ( bli_obj_has_conj( b ) && !bli_obj_has_trans( b ) ) return false;
+		// figure out the M*N*K effort
+		const dim_t m_c = bli_obj_length ( c );
+		const dim_t n_c = bli_obj_width ( c );
+		const dim_t k_a = bli_obj_has_trans ( a ) ? bli_obj_width ( a ) : bli_obj_length ( a );
+                const size_t mnk = m_c * n_c * k_a;
 
-		return ( bli_obj_is_scomplex( c ) ) ? ( mul >= config->offload_cgemm_thresh ) : ( mul >= config->offload_zgemm_thresh );
+		if ( is_compl_c )
+                {
+                        // make sure we're not conjugate AND not transpose
+                        if ( bli_obj_has_conj( a ) && !bli_obj_has_trans( a ) ) return false;
+                        if ( bli_obj_has_conj( b ) && !bli_obj_has_trans( b ) ) return false;
+                }
+
+		double mem_copy_cost_to_cpu = 0.0;
+		double mem_copy_cost_to_acc = 0.0;
+		if ( !bli_off_mem_trans )
+		{
+			void *A = bli_obj_buffer_at_off ( a ); // pointer to elements of Matrix A
+		        void *B = bli_obj_buffer_at_off ( b ); // pointer to elements of Matrix B
+			void *C = bli_obj_buffer_at_off ( c ); // pointer to elements of Matrix C
+
+			const inc_t lda = bli_obj_col_stride ( a );
+			const inc_t ldb = bli_obj_col_stride ( b );
+			const inc_t ldc = bli_obj_col_stride ( c );
+			const dim_t n_a = bli_obj_width ( a );
+			const dim_t n_b = bli_obj_width ( b );
+			const size_t buff_size_a = lda * n_a * bli_obj_elem_size ( a );
+        		const size_t buff_size_b = ldb * n_b * bli_obj_elem_size ( b );
+        		const size_t buff_size_c = ldc * n_c * bli_obj_elem_size ( c );
+
+			// actually inspect all the pointers for their location
+			hipPointerAttribute_t attr;
+			bool a_on_dev = false;
+	                const hipError_t err_insp_a = hipPointerGetAttributes(&attr, A);
+        	        if ( err_insp_a == hipSuccess )
+                	{
+                        	a_on_dev = ( attr.memoryType == hipMemoryTypeDevice );
+                	}
+			bool b_on_dev = false;
+                	const hipError_t err_insp_b = hipPointerGetAttributes(&attr, B);
+                	if ( err_insp_b == hipSuccess )
+                	{
+                        	b_on_dev = ( attr.memoryType == hipMemoryTypeDevice );
+                	}
+			bool c_on_dev = false;
+                	const hipError_t err_insp_c = hipPointerGetAttributes(&attr, C);
+                	if ( err_insp_c == hipSuccess )
+                	{
+                        	c_on_dev = ( attr.memoryType == hipMemoryTypeDevice );
+                	}
+
+			// compute copy cost to or from device based on whether a copy is necessary
+			double cost_a_to_cpu = 0.0, cost_a_to_acc = 0.0, cost_b_to_cpu = 0.0,
+			       cost_b_to_acc = 0.0, cost_c_to_cpu = 0.0, cost_c_to_acc = 0.0;
+
+			if ( a_on_dev )
+			{
+				cost_a_to_cpu = bli_off_pm1_mem_cost ( buff_size_a ); 
+			}
+			else
+			{
+				cost_a_to_acc = bli_off_pm1_mem_cost ( buff_size_a );
+			}
+			if ( b_on_dev )
+                        {
+                                cost_b_to_cpu = bli_off_pm1_mem_cost ( buff_size_b );
+                        }
+                        else
+                        {
+                                cost_b_to_acc = bli_off_pm1_mem_cost ( buff_size_b );
+			}
+			if ( c_on_dev )
+                        {
+                                cost_c_to_cpu = bli_off_pm1_mem_cost ( buff_size_c );
+                        }
+                        else
+                        {
+                                cost_c_to_acc = bli_off_pm1_mem_cost ( buff_size_c );
+			}
+
+			mem_copy_cost_to_cpu = cost_a_to_cpu + cost_b_to_cpu + cost_c_to_cpu;
+			mem_copy_cost_to_acc = cost_a_to_acc + cost_b_to_acc + cost_c_to_acc;
+		}
+
+		// gemm cost
+		const bool is_squarish_gemm = bli_is_squarish ( m_c, n_c, k_a);
+		// [s,d,c,z]
+		double a_cpu = 0.0, b_cpu = 0.0, a_acc = 0.0, b_acc = 0.0;
+		if ( is_float_c )
+		{
+			if ( is_squarish_gemm )
+			{
+				a_cpu = bli_off_sgemm_sq[BLI_OFF_CPU_A];
+				b_cpu = bli_off_sgemm_sq[BLI_OFF_CPU_B];
+				a_acc = bli_off_sgemm_sq[BLI_OFF_ACC_A];
+				b_acc = bli_off_sgemm_sq[BLI_OFF_ACC_B];
+			}
+			else
+			{
+				a_cpu = bli_off_sgemm[BLI_OFF_CPU_A];
+                                b_cpu = bli_off_sgemm[BLI_OFF_CPU_B];
+                                a_acc = bli_off_sgemm[BLI_OFF_ACC_A];
+                                b_acc = bli_off_sgemm[BLI_OFF_ACC_B];
+			}
+		}
+		else if ( is_double_c )
+		{
+			if ( is_squarish_gemm )
+                        {
+                                a_cpu = bli_off_dgemm_sq[BLI_OFF_CPU_A];
+                                b_cpu = bli_off_dgemm_sq[BLI_OFF_CPU_B];
+                                a_acc = bli_off_dgemm_sq[BLI_OFF_ACC_A];
+                                b_acc = bli_off_dgemm_sq[BLI_OFF_ACC_B];
+                        }
+                        else
+                        {
+                                a_cpu = bli_off_dgemm[BLI_OFF_CPU_A];
+                                b_cpu = bli_off_dgemm[BLI_OFF_CPU_B];
+                                a_acc = bli_off_dgemm[BLI_OFF_ACC_A];
+                                b_acc = bli_off_dgemm[BLI_OFF_ACC_B];
+                        }
+		}
+		else if ( is_scmpl_c )
+		{
+			if ( is_squarish_gemm )
+                        {
+                                a_cpu = bli_off_cgemm_sq[BLI_OFF_CPU_A];
+                                b_cpu = bli_off_cgemm_sq[BLI_OFF_CPU_B];
+                                a_acc = bli_off_cgemm_sq[BLI_OFF_ACC_A];
+                                b_acc = bli_off_cgemm_sq[BLI_OFF_ACC_B];
+                        }
+                        else
+                        {
+                                a_cpu = bli_off_cgemm[BLI_OFF_CPU_A];
+                                b_cpu = bli_off_cgemm[BLI_OFF_CPU_B];
+                                a_acc = bli_off_cgemm[BLI_OFF_ACC_A];
+                                b_acc = bli_off_cgemm[BLI_OFF_ACC_B];
+                        }
+		}
+		else if ( is_dcmpl_c )
+		{
+			if ( is_squarish_gemm )
+                        {
+                                a_cpu = bli_off_zgemm_sq[BLI_OFF_CPU_A];
+                                b_cpu = bli_off_zgemm_sq[BLI_OFF_CPU_B];
+                                a_acc = bli_off_zgemm_sq[BLI_OFF_ACC_A];
+                                b_acc = bli_off_zgemm_sq[BLI_OFF_ACC_B];
+                        }
+                        else
+                        {
+                                a_cpu = bli_off_zgemm[BLI_OFF_CPU_A];
+                                b_cpu = bli_off_zgemm[BLI_OFF_CPU_B];
+                                a_acc = bli_off_zgemm[BLI_OFF_ACC_A];
+                                b_acc = bli_off_zgemm[BLI_OFF_ACC_B];
+                        }
+		}
+		else
+		{
+			fprintf ( stderr, "Unknown case for PM1 gemm model.\n" );
+			return false;
+		}
+		
+		const double gemm_cost_cpu = bli_off_pm1_gemm_cost ( mnk, a_cpu, b_cpu);
+		const double gemm_cost_acc = bli_off_pm1_gemm_cost ( mnk, a_acc, b_acc);
+
+		return ( mem_copy_cost_to_acc + gemm_cost_acc ) < ( mem_copy_cost_to_cpu + gemm_cost_cpu );
 	}
+
+	// default false
+	return false;
 }
 
 
@@ -279,76 +579,30 @@ err_t bli_offload_gemmex_rntm_from_env
      )
 {
 
-	offload_t* config = rntm->offloader_state;
+	bli_offload_t* config = rntm->offloader_state;
 
-	// never offload anything
-	if ( config->never_offload_dgemm && config->never_offload_sgemm )
-	{
-		return BLIS_FAILURE;
-	}
+	// at this point we will offload - no checking with model or for compat
+	// any error belongs to the user now
 
-	// figure out if C is integer and reject
-	if ( bli_obj_is_int ( a ) ||  bli_obj_is_int ( b ) || bli_obj_is_int ( c ) )
-	{
-		return BLIS_EXPECTED_NONINTEGER_DATATYPE;
-	}
-
-	const inc_t rs_a = bli_obj_row_stride ( a );
-	const inc_t rs_b = bli_obj_row_stride ( b );
-	const inc_t rs_c = bli_obj_row_stride ( c );
-	// do not offload if any row stride is != 1 (as rocBLAS only supports col strides)
-	if ( rs_a != 1 || rs_b != 1 || rs_c != 1 )
-	{
-		return BLIS_INVALID_ROW_STRIDE;
-	}
+        // check for float
+	const bool is_float_a = bli_obj_is_float ( a );
+	const bool is_float_b = bli_obj_is_float ( b );
+	const bool is_float_c = bli_obj_is_float ( c );
 
 	// are any of the matrices complex
         const bool is_compl_a = bli_obj_is_complex ( a );
         const bool is_compl_b = bli_obj_is_complex ( b );
 	const bool is_compl_c = bli_obj_is_complex ( c );
 
-	// figure out if the result matrix C's M*N is above or below the data type specific cutoff
-	const bool is_float_a = bli_obj_is_float ( a );
-	const bool is_float_b = bli_obj_is_float ( b );
-	const bool is_float_c = bli_obj_is_float ( c );
-	if ( is_float_c && config->never_offload_sgemm )
-	{
-		return BLIS_FAILURE;
-	}
-	else if ( !is_float_c && config->never_offload_dgemm )
-	{
-		return BLIS_FAILURE;
-	}
-
 	const inc_t lda = bli_obj_col_stride ( a );
 	const inc_t ldb = bli_obj_col_stride ( b );
 	const inc_t ldc = bli_obj_col_stride ( c );
 	const dim_t m_a = bli_obj_length ( a );
 	const dim_t n_a = bli_obj_width ( a );
-	// const dim_t m_b = bli_obj_length ( b );
 	const dim_t n_b = bli_obj_width ( b );
 	const dim_t m_c = bli_obj_length ( c );
 	const dim_t n_c = bli_obj_width ( c );
-	const size_t mul = m_c * n_c;
 
-	bool should_offload;
-	if ( !is_compl_c )
-        {
-                should_offload = ( is_float_c ) ? ( mul >= config->offload_sgemm_thresh ) : ( mul >= config->offload_dgemm_thresh );
-        }
-        else
-        {
-		// make sure we're not conjugate AND not transpose
-                if ( bli_obj_has_conj( a ) && !bli_obj_has_trans( a ) ) should_offload = false;
-		else if ( bli_obj_has_conj( b ) && !bli_obj_has_trans( b ) ) should_offload = false;
-		else should_offload = ( bli_obj_is_scomplex( c ) ) ? ( mul >= config->offload_cgemm_thresh ) : ( mul >= config->offload_zgemm_thresh );
-        }
-	if ( !should_offload )
-        {
-                return BLIS_NONCONFORMAL_DIMENSIONS;
-        }
-
-	// we should offload: gather some dimensions and pointers
 	void *A = bli_obj_buffer_at_off ( a ); // pointer to elements of Matrix A
 	void *B = bli_obj_buffer_at_off ( b ); // pointer to elements of Matrix B
 	void *C = bli_obj_buffer_at_off ( c ); // pointer to elements of Matrix C
@@ -360,26 +614,42 @@ err_t bli_offload_gemmex_rntm_from_env
 	const size_t buff_size_b = ldb * n_b * bli_obj_elem_size ( b );
 	const size_t buff_size_c = ldc * n_c * bli_obj_elem_size ( c );
 
-	// inspect pointers for memory location of buffers
-	hipPointerAttribute_t attr;
-	const hipError_t err_insp_a = hipPointerGetAttributes(&attr, A);
-        bool copy_a = true;
-	if ( err_insp_a == hipSuccess )
-	{
-		copy_a = ( attr.memoryType != hipMemoryTypeDevice );
+	bool copy_a = false, copy_b = false, copy_c = false;
+	if ( config->model != pm1 || bli_off_mem_trans )
+        {	
+		// inspect pointers for memory location of buffers
+		hipPointerAttribute_t attr;
+		const hipError_t err_insp_a = hipPointerGetAttributes(&attr, A);
+		if ( err_insp_a == hipSuccess )
+		{
+			copy_a = ( attr.memoryType != hipMemoryTypeDevice );
+	   	}
+		else
+		{
+			// failure to inspect may happen for host pointers
+			copy_a = true;
+		}
+		const hipError_t err_insp_b = hipPointerGetAttributes(&attr, B);
+		if ( err_insp_b == hipSuccess )
+        	{
+                	copy_b = ( attr.memoryType != hipMemoryTypeDevice );
+        	}
+		else
+                {
+			// failure to inspect may happen for host pointers
+                        copy_b = true;
+                }
+		const hipError_t err_insp_c = hipPointerGetAttributes(&attr, C);
+        	if ( err_insp_c == hipSuccess )
+        	{
+                	copy_c = ( attr.memoryType != hipMemoryTypeDevice );
+        	}
+		else
+                {
+			// failure to inspect may happen for host pointers
+                        copy_c = true;
+                }
 	}
-	const hipError_t err_insp_b = hipPointerGetAttributes(&attr, B);
-	bool copy_b = true;
-	if ( err_insp_b == hipSuccess )
-        {
-                copy_b = ( attr.memoryType != hipMemoryTypeDevice );
-        }
-	const hipError_t err_insp_c = hipPointerGetAttributes(&attr, C);
-        bool copy_c = true;
-        if ( err_insp_c == hipSuccess )
-        {
-                copy_c = ( attr.memoryType != hipMemoryTypeDevice );
-        }
 
 	// if applicable: allocate buffers on device and copy data
 	// note: we cannot assume the CPU buffers to be pinned and hence most likely the copies will be synchronous
@@ -567,6 +837,26 @@ err_t bli_offload_gemmex_rntm_from_env
 	}
 
 	return BLIS_SUCCESS;
+}
+
+static inline bool bli_is_squarish ( const dim_t m, const dim_t n, const dim_t k )
+{
+        const dim_t max_mn = bli_max ( m, n );
+        const dim_t max_mnk = bli_max ( max_mn, k );
+        const dim_t min_mn = bli_min ( m, n );
+        const dim_t min_mnk = bli_min ( min_mn, k );
+
+        return ( max_mnk <= 2 * min_mnk );
+}
+
+static inline double bli_off_pm1_mem_cost ( const size_t length )
+{
+        return bli_off_a_mem * length + bli_off_b_mem;
+}
+
+static inline double bli_off_pm1_gemm_cost ( const size_t mnk, const double a, const double b )
+{
+        return a * mnk + b;
 }
 
 #endif

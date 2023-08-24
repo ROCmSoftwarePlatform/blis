@@ -13,6 +13,12 @@ void bli_offloader_finalize ( void );
 
 void bli_offloader_finalize_rntm_from_env ( rntm_t* rntm );
 
+static inline bool bli_is_squarish ( const dim_t m, const dim_t n, const dim_t k );
+
+static inline double bli_off_pm1_mem_cost ( const size_t length );
+
+static inline double bli_off_pm1_gemm_cost ( const size_t mnk, const double a, const double b );
+
 bool bli_do_offload_gemmex
      (
        const obj_t*  alpha,
