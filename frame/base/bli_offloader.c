@@ -355,8 +355,10 @@ bool bli_do_offload_gemmex_rntm_from_env
 		return false;
 	}
 
-	if ( config->model == always ) return true;
-	else if ( config->model == never ) return false;
+	if ( config->model == always )
+		return true;
+	else if ( config->model == never )
+		return false;
 	else if ( config->model == threshold )
         {
 		// figure out if the M*N*K effort is above or below the data type specific cutoff
@@ -467,7 +469,7 @@ bool bli_do_offload_gemmex_rntm_from_env
 		}
 
 		// gemm cost
-		const bool is_squarish_gemm = bli_is_squarish ( m_c, n_c, k_a);
+		const bool is_squarish_gemm = bli_is_squarish ( m_c, n_c, k_a );
 		// [s,d,c,z]
 		double a_cpu = 0.0, b_cpu = 0.0, a_acc = 0.0, b_acc = 0.0;
 		if ( is_float_c )
