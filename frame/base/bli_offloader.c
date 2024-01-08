@@ -420,19 +420,28 @@ bool bli_do_offload_gemmex_rntm_from_env
 	                const hipError_t err_insp_a = hipPointerGetAttributes(&attr, A);
         	        if ( err_insp_a == hipSuccess )
                 	{
-                        	a_on_dev = ( attr.memoryType == hipMemoryTypeDevice );
+                        	a_on_dev = ( attr.type == hipMemoryTypeDevice
+					|| attr.type == hipMemoryTypeManaged
+					|| attr.type == hipMemoryTypeArray
+					|| attr.type == hipMemoryTypeUnified );
                 	}
 			bool b_on_dev = false;
                 	const hipError_t err_insp_b = hipPointerGetAttributes(&attr, B);
                 	if ( err_insp_b == hipSuccess )
                 	{
-                        	b_on_dev = ( attr.memoryType == hipMemoryTypeDevice );
+                        	b_on_dev = ( attr.type == hipMemoryTypeDevice
+					|| attr.type == hipMemoryTypeManaged
+					|| attr.type == hipMemoryTypeArray
+					|| attr.type == hipMemoryTypeUnified );
                 	}
 			bool c_on_dev = false;
                 	const hipError_t err_insp_c = hipPointerGetAttributes(&attr, C);
                 	if ( err_insp_c == hipSuccess )
                 	{
-                        	c_on_dev = ( attr.memoryType == hipMemoryTypeDevice );
+                        	c_on_dev = ( attr.type == hipMemoryTypeDevice
+					|| attr.type == hipMemoryTypeManaged
+					|| attr.type == hipMemoryTypeArray
+					|| attr.type == hipMemoryTypeUnified );
                 	}
 
 			// compute copy cost to or from device based on whether a copy is necessary
@@ -624,7 +633,10 @@ err_t bli_offload_gemmex_rntm_from_env
 		const hipError_t err_insp_a = hipPointerGetAttributes(&attr, A);
 		if ( err_insp_a == hipSuccess )
 		{
-			copy_a = ( attr.memoryType != hipMemoryTypeDevice );
+			copy_a = ( attr.type != hipMemoryTypeDevice
+				&& attr.type != hipMemoryTypeManaged
+				&& attr.type != hipMemoryTypeArray
+				&& attr.type != hipMemoryTypeUnified );
 	   	}
 		else
 		{
@@ -634,7 +646,10 @@ err_t bli_offload_gemmex_rntm_from_env
 		const hipError_t err_insp_b = hipPointerGetAttributes(&attr, B);
 		if ( err_insp_b == hipSuccess )
         	{
-                	copy_b = ( attr.memoryType != hipMemoryTypeDevice );
+                	copy_b = ( attr.type != hipMemoryTypeDevice
+				&& attr.type != hipMemoryTypeManaged
+				&& attr.type != hipMemoryTypeArray
+				&& attr.type != hipMemoryTypeUnified );
         	}
 		else
                 {
@@ -644,7 +659,10 @@ err_t bli_offload_gemmex_rntm_from_env
 		const hipError_t err_insp_c = hipPointerGetAttributes(&attr, C);
         	if ( err_insp_c == hipSuccess )
         	{
-                	copy_c = ( attr.memoryType != hipMemoryTypeDevice );
+                	copy_c = ( attr.type != hipMemoryTypeDevice
+				&& attr.type != hipMemoryTypeManaged
+				&& attr.type != hipMemoryTypeArray
+				&& attr.type != hipMemoryTypeUnified );
         	}
 		else
                 {
